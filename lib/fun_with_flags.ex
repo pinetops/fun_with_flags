@@ -74,7 +74,7 @@ defmodule FunWithFlags do
   def enabled?(flag_name, options \\ [])
 
   def enabled?(flag_name, []) when is_atom(flag_name) do
-    {:ok, flag} = @store.lookup(flag_name)
+    {:ok, flag} = sandbox_lookup(flag_name)
     Flag.enabled?(flag)
   end
 
@@ -83,7 +83,7 @@ defmodule FunWithFlags do
   end
 
   def enabled?(flag_name, [for: item]) when is_atom(flag_name) do
-    {:ok, flag} = @store.lookup(flag_name)
+    {:ok, flag} = sandbox_lookup(flag_name)
     Flag.enabled?(flag, for: item)
   end
 
@@ -179,7 +179,7 @@ defmodule FunWithFlags do
 
   def enable(flag_name, []) when is_atom(flag_name) do
     gate = Gate.new(:boolean, true)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, flag} -> verify(flag)
       error -> error
     end
@@ -191,7 +191,7 @@ defmodule FunWithFlags do
 
   def enable(flag_name, [for_actor: actor]) when is_atom(flag_name) do
     gate = Gate.new(:actor, actor, true)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, flag} -> verify(flag, for: actor)
       error -> error
     end
@@ -204,7 +204,7 @@ defmodule FunWithFlags do
 
   def enable(flag_name, [for_group: group_name]) when is_atom(flag_name) do
     gate = Gate.new(:group, group_name, true)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, _flag} -> {:ok, true}
       error -> error
     end
@@ -213,7 +213,7 @@ defmodule FunWithFlags do
 
   def enable(flag_name, [for_percentage_of: {:time, ratio}]) when is_atom(flag_name) do
     gate = Gate.new(:percentage_of_time, ratio)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, _flag} -> {:ok, true}
       error -> error
     end
@@ -221,7 +221,7 @@ defmodule FunWithFlags do
 
   def enable(flag_name, [for_percentage_of: {:actors, ratio}]) when is_atom(flag_name) do
     gate = Gate.new(:percentage_of_actors, ratio)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, _flag} -> {:ok, true}
       error -> error
     end
@@ -311,7 +311,7 @@ defmodule FunWithFlags do
 
   def disable(flag_name, []) when is_atom(flag_name) do
     gate = Gate.new(:boolean, false)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, flag} -> verify(flag)
       error -> error
     end
@@ -323,7 +323,7 @@ defmodule FunWithFlags do
 
   def disable(flag_name, [for_actor: actor]) when is_atom(flag_name) do
     gate = Gate.new(:actor, actor, false)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, flag} -> verify(flag, for: actor)
       error -> error
     end
@@ -335,7 +335,7 @@ defmodule FunWithFlags do
 
   def disable(flag_name, [for_group: group_name]) when is_atom(flag_name) do
     gate = Gate.new(:group, group_name, false)
-    case @store.put(flag_name, gate) do
+    case sandbox_put(flag_name, gate) do
       {:ok, _flag} -> {:ok, false}
       error -> error
     end
@@ -418,7 +418,7 @@ defmodule FunWithFlags do
   def clear(flag_name, options \\ [])
 
   def clear(flag_name, []) when is_atom(flag_name) do
-    case @store.delete(flag_name) do
+    case sandbox_delete(flag_name) do
       {:ok, _flag} -> :ok
       error -> error
     end
@@ -453,7 +453,7 @@ defmodule FunWithFlags do
   end
 
   defp _clear_gate(flag_name, gate) do
-    case @store.delete(flag_name, gate) do
+    case sandbox_delete_gate(flag_name, gate) do
       {:ok, _flag} -> :ok
       error -> error
     end
@@ -469,7 +469,7 @@ defmodule FunWithFlags do
   """
   @spec all_flag_names() :: {:ok, [atom]} | {:error, any}
   def all_flag_names do
-    @store.all_flag_names()
+    sandbox_all_flag_names()
   end
 
   @doc """
@@ -483,7 +483,7 @@ defmodule FunWithFlags do
   """
   @spec all_flags() :: {:ok, [FunWithFlags.Flag.t]} | {:error, any}
   def all_flags do
-    @store.all_flags()
+    sandbox_all_flags()
   end
 
 
@@ -498,14 +498,7 @@ defmodule FunWithFlags do
     case all_flag_names() do
       {:ok, names} ->
         if name in names do
-          result =
-            Config.persistence_adapter().get(name)
-            |> FunWithFlags.Telemetry.emit_persistence_event(:read, name, nil)
-
-          case result do
-            {:ok, flag} -> flag
-            error -> error
-          end
+          sandbox_get_flag(name)
         else
           nil
         end
@@ -528,4 +521,74 @@ defmodule FunWithFlags do
   #
   @doc false
   def compiled_store, do: @store
+
+  # -------------------------------------------------------------------
+  # Sandbox-aware private helpers
+  #
+  # When Process.get(:fwf_sandbox) returns an ETS table ref, all
+  # operations are redirected to FunWithFlags.Sandbox.Store, bypassing
+  # the entire store/cache/persistence stack.
+  # -------------------------------------------------------------------
+
+  defp sandbox_lookup(flag_name) do
+    case Process.get(:fwf_sandbox) do
+      nil -> @store.lookup(flag_name)
+      table -> FunWithFlags.Sandbox.Store.lookup(table, flag_name)
+    end
+  end
+
+  defp sandbox_put(flag_name, gate) do
+    case Process.get(:fwf_sandbox) do
+      nil -> @store.put(flag_name, gate)
+      table -> FunWithFlags.Sandbox.Store.put(table, flag_name, gate)
+    end
+  end
+
+  defp sandbox_delete(flag_name) do
+    case Process.get(:fwf_sandbox) do
+      nil -> @store.delete(flag_name)
+      table -> FunWithFlags.Sandbox.Store.delete(table, flag_name)
+    end
+  end
+
+  defp sandbox_delete_gate(flag_name, gate) do
+    case Process.get(:fwf_sandbox) do
+      nil -> @store.delete(flag_name, gate)
+      table -> FunWithFlags.Sandbox.Store.delete(table, flag_name, gate)
+    end
+  end
+
+  defp sandbox_all_flags do
+    case Process.get(:fwf_sandbox) do
+      nil -> @store.all_flags()
+      table -> FunWithFlags.Sandbox.Store.all_flags(table)
+    end
+  end
+
+  defp sandbox_all_flag_names do
+    case Process.get(:fwf_sandbox) do
+      nil -> @store.all_flag_names()
+      table -> FunWithFlags.Sandbox.Store.all_flag_names(table)
+    end
+  end
+
+  defp sandbox_get_flag(name) do
+    case Process.get(:fwf_sandbox) do
+      nil ->
+        result =
+          Config.persistence_adapter().get(name)
+          |> FunWithFlags.Telemetry.emit_persistence_event(:read, name, nil)
+
+        case result do
+          {:ok, flag} -> flag
+          error -> error
+        end
+
+      table ->
+        case FunWithFlags.Sandbox.Store.lookup(table, name) do
+          {:ok, flag} -> flag
+          error -> error
+        end
+    end
+  end
 end
