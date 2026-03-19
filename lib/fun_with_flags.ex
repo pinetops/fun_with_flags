@@ -525,55 +525,83 @@ defmodule FunWithFlags do
   # -------------------------------------------------------------------
   # Sandbox-aware private helpers
   #
-  # When Process.get(:fwf_sandbox) returns an ETS table ref, all
-  # operations are redirected to FunWithFlags.Sandbox.Store, bypassing
-  # the entire store/cache/persistence stack.
+  # When :fwf_sandbox is set in the process dictionary, all operations
+  # are redirected to FunWithFlags.Sandbox.Store. Also checks $callers
+  # for inherited sandbox (e.g. LiveView channel processes).
   # -------------------------------------------------------------------
 
-  defp sandbox_lookup(flag_name) do
+  defp sandbox_table do
     case Process.get(:fwf_sandbox) do
+      nil -> inherit_sandbox_from_callers()
+      table -> table
+    end
+  end
+
+  defp inherit_sandbox_from_callers do
+    with [_ | _] = callers <- Process.get(:"$callers"),
+         table when not is_nil(table) <- find_sandbox_in_callers(callers) do
+      Process.put(:fwf_sandbox, table)
+      table
+    else
+      _ -> nil
+    end
+  end
+
+  defp find_sandbox_in_callers(callers) do
+    Enum.find_value(callers, fn pid ->
+      with {:dictionary, dict} <- :erlang.process_info(pid, :dictionary),
+           {:fwf_sandbox, table} <- List.keyfind(dict, :fwf_sandbox, 0) do
+        table
+      else
+        _ -> nil
+      end
+    end)
+  end
+
+  defp sandbox_lookup(flag_name) do
+    case sandbox_table() do
       nil -> @store.lookup(flag_name)
       table -> FunWithFlags.Sandbox.Store.lookup(table, flag_name)
     end
   end
 
   defp sandbox_put(flag_name, gate) do
-    case Process.get(:fwf_sandbox) do
+    case sandbox_table() do
       nil -> @store.put(flag_name, gate)
       table -> FunWithFlags.Sandbox.Store.put(table, flag_name, gate)
     end
   end
 
   defp sandbox_delete(flag_name) do
-    case Process.get(:fwf_sandbox) do
+    case sandbox_table() do
       nil -> @store.delete(flag_name)
       table -> FunWithFlags.Sandbox.Store.delete(table, flag_name)
     end
   end
 
   defp sandbox_delete_gate(flag_name, gate) do
-    case Process.get(:fwf_sandbox) do
+    case sandbox_table() do
       nil -> @store.delete(flag_name, gate)
       table -> FunWithFlags.Sandbox.Store.delete(table, flag_name, gate)
     end
   end
 
   defp sandbox_all_flags do
-    case Process.get(:fwf_sandbox) do
+    case sandbox_table() do
       nil -> @store.all_flags()
       table -> FunWithFlags.Sandbox.Store.all_flags(table)
     end
   end
 
   defp sandbox_all_flag_names do
-    case Process.get(:fwf_sandbox) do
+    case sandbox_table() do
       nil -> @store.all_flag_names()
       table -> FunWithFlags.Sandbox.Store.all_flag_names(table)
     end
   end
 
   defp sandbox_get_flag(name) do
-    case Process.get(:fwf_sandbox) do
+    case sandbox_table() do
       nil ->
         result =
           Config.persistence_adapter().get(name)
